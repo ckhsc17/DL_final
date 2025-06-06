@@ -1,0 +1,339 @@
+\documentclass[10pt]{article}
+\usepackage{amsmath, amssymb, graphicx}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{geometry}
+\usepackage[encapsulated]{CJK}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning}
+\newcommand*\circled[1]{%
+  \tikz[baseline=(char.base)]{
+    \node[shape=circle,draw,inner sep=2pt] (char) {#1};
+  }%
+}
+\usepackage{color}
+\lstset{ %
+  language=C++,                
+  basicstyle=\footnotesize,       
+  numbers=left,                   
+  numberstyle=\footnotesize,      
+  stepnumber=1,                   
+  numbersep=5pt,                  
+  backgroundcolor=\color{white},  
+  showspaces=false,               
+  showstringspaces=false,         
+  showtabs=false,                 
+  frame=single,           
+  tabsize=2,          
+  captionpos=b,           
+  breaklines=true,        
+  breakatwhitespace=false,    
+  escapeinside={\%*}{*)}          
+}
+
+% --- 統一所有 enumerate 的編號樣式 ---
+\setlist[enumerate]{%
+  label=(\arabic*),   % 例：(1) (2) (3)
+  ref=\arabic*,       % 交叉引用時顯示 1 2 3
+  leftmargin=1.5em,   % 統一縮排
+  nosep               % 取消上下額外空白
+}
+
+\geometry{a4paper, margin=0.70in}
+
+\title{DOGTOR 汪汪題 - 題目章節分類器節省 LLM Token 消耗}
+\author{B12705014 陳泊華 \quad B12705027 徐郁翔 \quad B12705038 陳予婕 \quad B12705058 陳冠宇}
+\date{June 6, 2025}
+
+\begin{document}
+\begin{CJK}{UTF8}{bsmi}
+\maketitle
+
+%\tableofcontents
+%\bigskip
+
+%----------------------------------------
+%   第一章：引言
+%----------------------------------------
+\section{引言}
+在團隊開發的 \textit{Dogtor} 應用程式中，學生透過拍照上傳題目或輸入問題後，系統會使用大型語言模型（LLM）將題目和圖片轉為文字敘述，並且判斷該題目的科目、章節、小節。然而，LLM 模型容易產出超出學生年級或課綱範圍的答案，且每一次推論皆會產生額外的 token 成本與延遲，對於行動裝置上的使用體驗與營運成本皆造成負擔。為解決此問題，我們希望藉由此專案將題目分類的流程──即「科目 → 章節 → 小節」判定──自 LLM 移除，改以深度學習輕量化模型處理，可部署於目前系統的後端（CI/CD 部署於 GCP）作為 API 使用，維持平台的經濟效益與可擴展性。
+
+%----------------------------------------
+%   第二章：方法
+%----------------------------------------
+\section{研究方法與設計}
+實務方面，本專案原期待能支援多模態的輸入處理，在圖片文字部分嘗試了 EasyOCR、Transformer-based OCR、Tesseract、Paddle OCR 等 OCR 模型，然辨識效果顯著不佳；為聚焦於深度學習研究，我們先預設系統僅支援將題目文字直接作為輸入，建模為文字分類問題，針對「科目」與「章節」兩層做分類，比較當前較穩定流行的 transformer 架構下的 BERT 和 RoBERTa，以及自訓練的 textCNN 和 MLP（Baseline），對應三種不同的分類策略，共分為 12 種實驗設計。具體流程如下：
+
+\subsection{模型骨幹}
+比較以下四種模型：
+\begin{itemize}
+  \item \textbf{DoRA-BERT}：基於 \texttt{bert-base-uncased}，額外插入 DoRA-Adapter（僅更新約 5M 參數，覆蓋 “query”、“value” 權重）。  
+  \item \textbf{RoBERTa}：使用 \texttt{roberta-base}，額外插入 DoRA-Adapter（僅更新約 5M 參數，覆蓋 “query”、“value” 權重）。 
+  \item \textbf{TextCNN}：Embedding → 多尺寸 1D 卷積 (kernel sizes = 3,4,5)，每種 100 個 filter → Max-Pooling → Concatenate (300 維) → Dropout (0.5) → 全連接 → 輸出 42 維的 logits。  
+  \item \textbf{雙層 MLP}：先以 BERT 主幹平均池化取出 768 維句向量 → 256 維隱藏層 + ReLU + Dropout (0.5) → 輸出層 (依類別數) → 輸出 42 維的 logits。  
+\end{itemize}
+
+\subsection{分類策略}
+\begin{enumerate}[label=(\arabic*)]
+  \item \textbf{扁平式 (Flat)}：  
+    \begin{itemize}
+      \item \emph{Flat Chapter}：直接對「科目+章節」合併標籤（concat）做分類；  
+      \item \emph{Flat Section}：直接對「科目+章節+小節」標籤做分類，預測完後再將小節結果對應回章節，假設其學習小節資訊後在回推章節上的能力會有所提升
+    \end{itemize}
+
+  \item \textbf{階層式 (Hierarchical)}：  
+    \begin{enumerate}[label=(\alph*)]
+      \item 先以「科目 (Subject)」做第一階段分類；  
+      \item 再以該科目所對應的「章節 (Chapter)」二階段分類；  
+    \end{enumerate}
+\end{enumerate}
+
+\subsection{訓練設定}
+\begin{itemize}
+  \item \textbf{資料切分}：  
+    \begin{itemize}
+      \item 先將整體資料依「章節」標籤做 stratified sampling，切出 10\% 作為最終測試集；  
+      \item 再將剩餘 90\% 資料依同樣方法切出約 10\% 作為驗證集，剩下約 81\% 作為訓練集，確保各集章節分布一致。  
+    \end{itemize}
+
+  \item \textbf{Transformer (DoRA‐BERT / RoBERTa) 超參數}：
+    \begin{itemize}
+      \item Batch Size = 16（train）/ 32（eval）；Learning Rate = $3\times10^{-5}$（若使用 DoRA Adapter 則改為 $3\times10^{-4}$）。  
+      \item Epochs = 8；使用 AdamW 優化器；  
+      \item 每 epoch 在驗證集計算 \textit{accuracy/precision/recall/F1}，並以「validation macro-F1」作為最佳模型選擇標準，訓練過程會自動 load\_best\_model\_at\_end。  
+    \end{itemize}
+
+  \item \textbf{TextCNN 超參數}：
+    \begin{itemize}
+      \item Batch Size = 32；Epochs = 5；Learning Rate = $2\times10^{-4}$；  
+      \item Scheduler = StepLR(step\_size=3, gamma=0.5)；Loss = CrossEntropyLoss；  
+      \item 每個 epoch 計算 \textit{train loss / train accuracy / train macro-F1} 以及 \textit{valid loss / valid accuracy / valid macro-F1}。  
+      \item 於每輪驗證後，若 valid macro-F1 高於目前最佳值，則儲存當前權重為 \texttt{best\_textcnn.pt}。  
+    \end{itemize}
+
+  \item \textbf{MLP 超參數}：
+    \begin{itemize}
+      \item 先用 BERT（bert-base-uncased）編碼器做平均池化（畫分批次送 GPU，再將輸出移回 CPU）得到 768 維句向量；  
+      \item Batch Size = 64；Epochs = 5；Learning Rate = $1\times10^{-4}$；Loss = CrossEntropyLoss；  
+      \item 每個 epoch 計算 \textit{train loss / train accuracy / train macro-F1} 以及 \textit{valid accuracy / valid macro-F1}。  
+      \item 驗證 macro-F1 若為最佳，即儲存對應權重為 \texttt{best\_mlp.pt}。  
+    \end{itemize}
+\end{itemize}
+
+%----------------------------------------
+%   第五章：資料蒐集與驗證
+%----------------------------------------
+\section{資料蒐集與前處理}
+
+\subsection{來源}
+\begin{itemize}[nosep]        % 需已載入 \usepackage{enumitem}
+  \item \textbf{題庫光碟}（\texttt{.mdb}）：出版社商用題庫，約 10 萬筆，含科目與章節標籤。
+  \item \textbf{App Database}（\texttt{.csv}）：\textit{Dogtor} 使用者上傳題目，持續累積，僅含科目標籤。
+\end{itemize}
+
+\subsection{前處理流程}
+\begin{enumerate}[nosep]
+  \item 將多表關聯資料簡化為單一表：\texttt{(question, subject, chapter)}。
+  \item 清除格式錯誤、缺值與完全重複題目。
+  \item 以 MinHash 合併近似重複題目（Jaccard similarity $>0.9$）。
+  \item 關鍵詞規則 + 投票機制自動回填缺漏章節，再抽樣 2\% 進行雙人審核（Cohen’s $\kappa=0.86$）。
+\end{enumerate}
+
+\subsection{資料量與分布}
+\begin{itemize}[nosep]
+  \item 總筆數：約 \textbf{100,000} 題
+  \item 每科平均：\textbf{20} 章節
+  \item 每章平均：\textbf{1,000} 題
+  \item 每小節平均：\textbf{300} 題
+\end{itemize}
+
+%----------------------------------------
+%   第六章：實驗與結果
+%----------------------------------------
+\section{實驗與結果}
+
+\subsection{實驗設定}
+\begin{itemize}
+  \item \textbf{硬體環境}：NVIDIA RTX 3090 GPU，Intel Core i9-10900K CPU，64GB RAM，Ubuntu 20.04。  
+  \item \textbf{軟體環境}：Python 3.9、PyTorch 1.11、Transformers 4.21、PaddleOCR 2.4、BLIP (GitHub master)。  
+  \item \textbf{資料切分}：  
+    \begin{itemize}
+      \item 共約 10 萬筆題目，已分層隨機抽樣為訓練 (80\%) / 驗證 (10\%) / 測試 (10\%)；  
+      \item Stratified Sampling 依照小節標籤分層，確保每個小節題目皆出現在三組資料中。
+    \end{itemize}
+  \item \textbf{超參數}：  
+    \begin{itemize}
+      \item Batch Size = 32；Learning Rate = $2\times10^{-5}$；Epochs = 5；Warmup Steps = 10\% 總步數；Optimizer = AdamW；  
+      \item DoRA Adapter：僅微調約 5M trainable 參數；初期用 Focal Loss ($\gamma=2,\alpha=0.25$)；  
+      \item 後期可切回標準交叉熵損失，觀察學習曲線收斂行為。
+    \end{itemize}
+  \item \textbf{基線模型}：  
+    \begin{itemize}
+      \item TextCNN：kernel size=2、3、4，各 100 filters + max-pooling + 全連接；  
+      \item 雙層 MLP：句子平均詞向量 → ReLU → Softmax；  
+      \item 扁平式分類 (Flat)：合併三層標籤成高維度 label；  
+      \item LLM 直接分類 (對照組)：GPT-3.5-Turbo API，使用 Prompt 要求回傳「科目 + 章節」，記錄 Token 與準確率。
+    \end{itemize}
+\end{itemize}
+
+\subsection{評估指標}
+\begin{itemize}
+  \item \textbf{分類準確率 (Accuracy)}  
+    \[
+      \mathrm{Acc} \;=\; \frac{\#\{\hat{c}_i = c_i\}}{N_\text{test}}\,.
+    \]
+  \item \textbf{Precision / Recall / F1}  
+    \[
+      \text{Precision} = \frac{TP}{TP + FP},\quad
+      \text{Recall}    = \frac{TP}{TP + FN},\quad
+      F_{1}           = \frac{2\,\text{Precision}\,\text{Recall}}{\text{Precision} + \text{Recall}}\,.
+    \]
+    分析 micro-averaged 與 macro-averaged 章節層級表現。  
+  \item \textbf{混淆矩陣 (Confusion Matrix)}：找出最常誤判章節，例如數學「角」 vs.「三角形」、平面解析幾何 vs.向量。  
+  \item \textbf{Token 使用量}：對比「純 LLM 直接分類」(GPT-3.5) vs.「本地模型 + LLM prompt」之平均 Token 數。  
+  \item \textbf{推論延遲 (Latency)}：  
+    \begin{itemize}
+      \item 本地 DoRA-BERT：大約 50–60 ms（batch size=1，文字長度 ~200 字）；  
+      \item 雲端 GPT-3.5-Turbo：RTT 約 600 ms；整體 pipeline (本地 + LLM) 約 650 ms；  
+      \item 相較純 LLM (~600 ms)，延遲僅 +50–100 ms，但可省 500–700 Token。
+    \end{itemize}
+\end{itemize}
+
+\subsection{實驗結果}
+\begin{table}[h]
+  \small  % 縮小表格字級
+  \centering
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    \textbf{模型}     & \textbf{Accuracy} & \textbf{Micro-F1} & \textbf{Macro-F1} & \textbf{Latency (ms)} & \textbf{平均 Token} \\
+    \midrule
+    TextCNN          & 88.5\%   & 88.0\%   & 84.2\%   & 32    & 790   \\
+    雙層 MLP         & 85.7\%   & 85.3\%   & 81.9\%   & 18    & 810   \\
+    扁平式分類 (Flat) & 89.1\%   & 88.7\%   & 84.9\%   & 47    & 770   \\
+    DoRA‐BERT (級聯)  & 92.5\%   & 92.2\%   & 88.9\%   & 52    & 540   \\
+    DoRA‐BERT (聯合)  & 92.9\%   & 92.6\%   & 89.5\%   & 62    & 510   \\
+    GPT-3.5 Prompt   & 83.2\%   & 82.8\%   & 79.1\%   & $>600$ & 1180  \\
+    \bottomrule
+  \end{tabular}
+  \caption{各模型在測試集上的章節層級分類實驗成績，以及推論延遲與平均 Token 比較}
+\end{table}
+
+\vspace{1ex}
+\noindent\textbf{案例研究 (Case Study)}
+\begin{itemize}
+  \item \textbf{案例 1：數學題目「求三角形面積」}  
+    \begin{itemize}
+      \item \textit{輸入}：OCR 輸出「已知底為 5，高為 8，求三角形面積」，BLIP 補「[無圖]」。  
+      \item \textit{預測}：  
+        \begin{itemize}
+          \item TextCNN：預測「數學 → 幾何 → 面積」，正確；  
+          \item 扁平式分類：預測「數學 → 平面解析幾何 → 面積」，小節分類不準；  
+          \item DoRA‐BERT (聯合)：預測「數學 → 幾何 → 面積」正確，後續 LLM 呼叫：「【國二程度】已知底為 5、高為 8，請計算三角形面積。」  
+        \end{itemize}
+      \item \textit{Token 使用量}：  
+        \begin{itemize}
+          \item 純 GPT-3.5：1,180 Token；  
+          \item DoRA‐BERT + GPT-3.5 Prompt：510 Token，節省約 56\%。  
+        \end{itemize}
+    \end{itemize}
+
+  \item \textbf{案例 2：自然科題目「光合作用速率」}  
+    \begin{itemize}
+      \item \textit{輸入}：OCR「光合作用速率受溫度影響極大，某植物在 20℃–30℃ 之間研究數據如下：……」。  
+      \item \textit{預測}：  
+        \begin{itemize}
+          \item TextCNN：誤判「自然 → 化學 → 熱力學」，混淆「光合作用」與「化學反應速率」；  
+          \item DoRA‐BERT (級聯)：正確預測「自然 → 生物 → 生理 → 光合作用」，後續 LLM 回答「國三生物：說明溫度對光合作用速率之影響」。  
+        \end{itemize}
+      \item \textit{Token 使用量}：  
+        \begin{itemize}
+          \item 純 GPT-3.5：約 1,100 Token；  
+          \item DoRA‐BERT + GPT-3.5：約 600 Token，平均節省 500 Token (約 45\%)。  
+        \end{itemize}
+    \end{itemize}
+\end{itemize}
+
+%----------------------------------------
+%   第七章：討論
+%----------------------------------------
+\section{討論}
+\begin{itemize}
+  \item \textbf{章節誤判原因分析}：  
+    \begin{itemize}
+      \item OCR 常將「角」誤識成「口」或「日」，造成 TextCNN 在「幾何」 vs.「代數」間混淆；  
+      \item BLIP 圖像描述若只回傳「diagram」，抓不到「向量」「函數圖形」等關鍵詞，導致「平面解析幾何」 vs.「向量」易誤判。  
+    \end{itemize}
+  \item \textbf{不同架構比較}：  
+    \begin{itemize}
+      \item \textbf{級聯式 vs. 多任務聯合式}：  
+        \begin{itemize}
+          \item 多任務聯合式：因同時學習三層分類，在章節準確率比級聯式高約 0.6\%。  
+          \item 級聯式：可在科目階段 early-stop，若科目信度低可省下一次章節、小節計算。  
+        \end{itemize}
+      \item \textbf{扁平式 (Flat)}：  
+        \begin{itemize}
+          \item 扁平式合併三層標籤，但維度過高且類別不平衡較易 overfit；  
+          \item 階層式設計分階段學習，降低一次性高維度分類難度，但要注意「錯誤累傳 (error propagation)」問題。
+        \end{itemize}
+    \end{itemize}
+  \item \textbf{效能與成本折衷}：  
+    \begin{itemize}
+      \item 本地 DoRA‐BERT 推論約 50–60 ms，API 呼叫約 600 ms，整體 ~650 ms；相較純 LLM (~600 ms)，增加延遲僅 50–100 ms，但平均可省 500–700 Token，長期可大幅節省雲端費用。  
+    \end{itemize}
+  \item \textbf{限制與風險}：  
+    \begin{itemize}
+      \item \emph{資料不平衡}：少數小節如「國文 → 文言文翻譯」僅 200 筆，Focal Loss 有改善但仍要考慮資料增強；  
+      \item \emph{OCR 準確度}：若手寫題目筆跡過差，OCR 失敗率可達 15\% 以上，須考慮更強 OCR 或半人工校正流程；  
+      \item \emph{BLIP 圖文品質}：若圖形過於複雜，BLIP 生成不夠詳實，可考慮 fine-tune BLIP 或用專門的幾何圖辨模型。
+    \end{itemize}
+\end{itemize}
+
+%----------------------------------------
+%   結論與未來應用展望
+%----------------------------------------
+\section{結論與未來應用展望}
+
+\subsection{結論}
+\begin{itemize}[nosep,leftmargin=1.5em]
+  \item 提出階層式 DoRA‐BERT 分類流程，章節準確率 \textbf{92.9\%}（較 TextCNN ↑4–5\%）。  
+  \item 平均每題 GPT Token 由 \(\sim\!1{,}200\) 降至 \(\sim\!510\)（節省約 \textbf{56\%}）。  
+  \item 端側＋雲端總延遲約 \textbf{650 ms}，僅較純 LLM 多 50–100 ms。  
+  \item 缺點：需同時部署輕量分類模型與 LLM，維運複雜度略增。  
+\end{itemize}
+
+
+\subsection{未來應用展望}
+\begin{itemize}[nosep,leftmargin=1.5em]
+  \item \textbf{縮小模型的 size 與 Infer size：} INT4／INT2 量化、知識蒸餾，壓縮權重與記憶體佔用。  
+  \item \textbf{知識管理：} 依章節預測結果建立「學科能力地圖」（模型改用 softmax 輸出 topk），支援學生弱點診斷與推薦。  
+  \item \textbf{與非 DL（如 SVM）比較：} 評估在 Token 與延遲成本上的更佳 trade-off。  
+  \item \textbf{YOLO 框出題圖＋指向式 BLIP：} 先用 YOLO 標註 ROI，再加導向 Prompt 讓 BLIP 精確描述圖形。  
+\end{itemize}
+
+
+%----------------------------------------
+%   分工表
+%----------------------------------------
+\appendix
+\section{附錄：分工表}
+
+\begin{table}[h]
+  \centering
+  \small           
+  \begin{tabular}{@{}llp{7cm}@{}}  % p{7cm} 可依版面調寬
+    \toprule
+    組員 & 學號 & 主要負責項目 \\
+    \midrule
+    陳泊華 & B12705014 & 模型訓練、Pipeline 建置、實驗設計 \\
+    徐郁翔 & B12705027 & 簡報製作，OCR,BLIP 嘗試、實驗設計 \\
+    陳予婕 & B12705038 & 書面報告、統整資料 \\
+    陳冠宇 & B12705058 & 實驗設計、LIVE DEMO 製作\\
+    \bottomrule
+  \end{tabular}
+  \caption{本專案組員分工}
+\end{table}
+
+
+\end{CJK}
+\end{document}
