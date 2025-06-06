@@ -1,19 +1,25 @@
-\documentclass[10pt]{article}
-\usepackage{amsmath, amssymb, graphicx}
+\documentclass[10pt,conference]{IEEEtran}
+\usepackage{amsmath,amssymb,graphicx}
 \usepackage{booktabs}
 \usepackage{listings}
-\usepackage{geometry}
-\usepackage[encapsulated]{CJK}
 \usepackage{enumitem}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta, positioning}
-\newcommand*\circled[1]{%
-  \tikz[baseline=(char.base)]{
-    \node[shape=circle,draw,inner sep=2pt] (char) {#1};
-  }%
-}
 \usepackage{color}
-\lstset{ %
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage[encapsulated]{CJK}
+
+% --- 統一所有 enumerate 的編號樣式 ---
+\setlist[enumerate]{%
+  label=(\arabic*),   % 例：(1) (2) (3)
+  ref=\arabic*,       % 交叉引用時顯示 1 2 3
+  leftmargin=1.5em,   % 統一縮排
+  nosep               % 取消上下額外空白
+}
+
+% --- Listings 設定 ---
+\lstset{%
   language=C++,                
   basicstyle=\footnotesize,       
   numbers=left,                   
@@ -24,7 +30,7 @@
   showspaces=false,               
   showstringspaces=false,         
   showtabs=false,                 
-  frame=single,           
+  frame=single,                   
   tabsize=2,          
   captionpos=b,           
   breaklines=true,        
@@ -32,26 +38,42 @@
   escapeinside={\%*}{*)}          
 }
 
-% --- 統一所有 enumerate 的編號樣式 ---
-\setlist[enumerate]{%
-  label=(\arabic*),   % 例：(1) (2) (3)
-  ref=\arabic*,       % 交叉引用時顯示 1 2 3
-  leftmargin=1.5em,   % 統一縮排
-  nosep               % 取消上下額外空白
-}
-
-\geometry{a4paper, margin=0.70in}
-
-\title{DOGTOR 汪汪題 - 題目章節分類器節省 LLM Token 消耗}
-\author{B12705014 陳泊華 \quad B12705027 徐郁翔 \quad B12705038 陳予婕 \quad B12705058 陳冠宇}
-\date{June 6, 2025}
+% IEEEtran 本身已經設定好邊界，故不需要再用 geometry
 
 \begin{document}
 \begin{CJK}{UTF8}{bsmi}
+
+%----------------------------------------
+%   標題與作者 (IEEE 兩欄格式)
+%----------------------------------------
+\title{DOGTOR 汪汪題 \\ 題目章節分類器節省 LLM Token 消耗}
+
+\author{
+  \IEEEauthorblockN{
+    B12705014 陳泊華 \quad
+    B12705027 徐郁翔 \quad
+    B12705038 陳予婕 \quad
+    B12705058 陳冠宇
+  }
+  \IEEEauthorblockA{國立台灣大學 資訊管理學系 二年級}
+  \IEEEauthorblockA{
+    Email: b12705014@ntu.edu.tw, b12705027@ntu.edu.tw, b12705038@ntu.edu.tw, b12705058@ntu.edu.tw
+  }
+}
+
+
 \maketitle
 
-%\tableofcontents
-%\bigskip
+%----------------------------------------
+%   摘要 + 關鍵詞
+%----------------------------------------
+\begin{abstract}
+在團隊開發的 \textit{Dogtor} 應用程式中，學生透過拍照上傳題目或輸入問題後，系統會使用大型語言模型（LLM）將題目和圖片轉為文字敘述，並且判斷該題目的科目、章節、小節。然而，LLM 模型容易產出超出學生年級或課綱範圍的答案，且每一次推論皆會產生額外的 token 成本與延遲，對於行動裝置上的使用體驗與營運成本皆造成負擔。為解決此問題，我們希望藉由此專案將題目分類的流程──即「科目 → 章節 → 小節」判定──自 LLM 移除，改以深度學習輕量化模型處理，可部署於目前系統的後端（CI/CD 部署於 GCP）作為 API 使用，維持平台的經濟效益與可擴展性。
+\end{abstract}
+
+\begin{IEEEkeywords}
+題目分類, 深度學習, DoRA‐BERT, TextCNN, LLM Token 優化
+\end{IEEEkeywords}
 
 %----------------------------------------
 %   第一章：引言
@@ -60,10 +82,10 @@
 在團隊開發的 \textit{Dogtor} 應用程式中，學生透過拍照上傳題目或輸入問題後，系統會使用大型語言模型（LLM）將題目和圖片轉為文字敘述，並且判斷該題目的科目、章節、小節。然而，LLM 模型容易產出超出學生年級或課綱範圍的答案，且每一次推論皆會產生額外的 token 成本與延遲，對於行動裝置上的使用體驗與營運成本皆造成負擔。為解決此問題，我們希望藉由此專案將題目分類的流程──即「科目 → 章節 → 小節」判定──自 LLM 移除，改以深度學習輕量化模型處理，可部署於目前系統的後端（CI/CD 部署於 GCP）作為 API 使用，維持平台的經濟效益與可擴展性。
 
 %----------------------------------------
-%   第二章：方法
+%   第二章：研究方法與設計
 %----------------------------------------
 \section{研究方法與設計}
-實務方面，本專案原期待能支援多模態的輸入處理，在圖片文字部分嘗試了 EasyOCR、Transformer-based OCR、Tesseract、Paddle OCR 等 OCR 模型，然辨識效果顯著不佳；為聚焦於深度學習研究，我們先預設系統僅支援將題目文字直接作為輸入，建模為文字分類問題，針對「科目」與「章節」兩層做分類，比較當前較穩定流行的 transformer 架構下的 BERT 和 RoBERTa，以及自訓練的 textCNN 和 MLP（Baseline），對應三種不同的分類策略，共分為 12 種實驗設計。具體流程如下：
+實務方面，本專案原期待能支援多模態的輸入處理，在圖片文字部分嘗試了 EasyOCR、Transformer-based OCR、Tesseract、Paddle OCR 等 OCR 模型，然而辨識效果顯著不佳；為聚焦於深度學習研究，我們先預設系統僅支援將題目文字直接作為輸入，建模為文字分類問題，針對「科目」與「章節」兩層做分類，比較當前較穩定流行的 transformer 架構下的 BERT 和 RoBERTa，以及自訓練的 textCNN 和 MLP（Baseline），對應三種不同的分類策略，共分為 12 種實驗設計。具體流程如下：
 
 \subsection{模型骨幹}
 比較以下四種模型：
@@ -75,14 +97,14 @@
 \end{itemize}
 
 \subsection{分類策略}
-\begin{enumerate}[label=(\arabic*)]
-  \item \textbf{扁平式 (Flat)}：  
+\begin{enumerate}
+  \item \textbf{扁平式 (Flat)}  
     \begin{itemize}
       \item \emph{Flat Chapter}：直接對「科目+章節」合併標籤（concat）做分類；  
-      \item \emph{Flat Section}：直接對「科目+章節+小節」標籤做分類，預測完後再將小節結果對應回章節，假設其學習小節資訊後在回推章節上的能力會有所提升
+      \item \emph{Flat Section}：直接對「科目+章節+小節」標籤做分類，預測完後再將小節結果對應回章節，假設其學習小節資訊後在回推章節上的能力會有所提升。
     \end{itemize}
 
-  \item \textbf{階層式 (Hierarchical)}：  
+  \item \textbf{階層式 (Hierarchical)}  
     \begin{enumerate}[label=(\alph*)]
       \item 先以「科目 (Subject)」做第一階段分類；  
       \item 再以該科目所對應的「章節 (Chapter)」二階段分類；  
@@ -91,20 +113,20 @@
 
 \subsection{訓練設定}
 \begin{itemize}
-  \item \textbf{資料切分}：  
+  \item \textbf{資料切分}  
     \begin{itemize}
       \item 先將整體資料依「章節」標籤做 stratified sampling，切出 10\% 作為最終測試集；  
       \item 再將剩餘 90\% 資料依同樣方法切出約 10\% 作為驗證集，剩下約 81\% 作為訓練集，確保各集章節分布一致。  
     \end{itemize}
 
-  \item \textbf{Transformer (DoRA‐BERT / RoBERTa) 超參數}：
+  \item \textbf{Transformer (DoRA‐BERT / RoBERTa) 超參數}  
     \begin{itemize}
       \item Batch Size = 16（train）/ 32（eval）；Learning Rate = $3\times10^{-5}$（若使用 DoRA Adapter 則改為 $3\times10^{-4}$）。  
       \item Epochs = 8；使用 AdamW 優化器；  
       \item 每 epoch 在驗證集計算 \textit{accuracy/precision/recall/F1}，並以「validation macro-F1」作為最佳模型選擇標準，訓練過程會自動 load\_best\_model\_at\_end。  
     \end{itemize}
 
-  \item \textbf{TextCNN 超參數}：
+  \item \textbf{TextCNN 超參數}  
     \begin{itemize}
       \item Batch Size = 32；Epochs = 5；Learning Rate = $2\times10^{-4}$；  
       \item Scheduler = StepLR(step\_size=3, gamma=0.5)；Loss = CrossEntropyLoss；  
@@ -112,7 +134,7 @@
       \item 於每輪驗證後，若 valid macro-F1 高於目前最佳值，則儲存當前權重為 \texttt{best\_textcnn.pt}。  
     \end{itemize}
 
-  \item \textbf{MLP 超參數}：
+  \item \textbf{MLP 超參數}  
     \begin{itemize}
       \item 先用 BERT（bert-base-uncased）編碼器做平均池化（畫分批次送 GPU，再將輸出移回 CPU）得到 768 維句向量；  
       \item Batch Size = 64；Epochs = 5；Learning Rate = $1\times10^{-4}$；Loss = CrossEntropyLoss；  
@@ -122,12 +144,12 @@
 \end{itemize}
 
 %----------------------------------------
-%   第五章：資料蒐集與驗證
+%   第三章：資料蒐集與前處理
 %----------------------------------------
 \section{資料蒐集與前處理}
 
 \subsection{來源}
-\begin{itemize}[nosep]        % 需已載入 \usepackage{enumitem}
+\begin{itemize}[nosep]
   \item \textbf{題庫光碟}（\texttt{.mdb}）：出版社商用題庫，約 10 萬筆，含科目與章節標籤。
   \item \textbf{App Database}（\texttt{.csv}）：\textit{Dogtor} 使用者上傳題目，持續累積，僅含科目標籤。
 \end{itemize}
@@ -149,7 +171,7 @@
 \end{itemize}
 
 %----------------------------------------
-%   第六章：實驗與結果
+%   第四章：實驗與結果
 %----------------------------------------
 \section{實驗與結果}
 
@@ -184,11 +206,12 @@
       \mathrm{Acc} \;=\; \frac{\#\{\hat{c}_i = c_i\}}{N_\text{test}}\,.
     \]
   \item \textbf{Precision / Recall / F1}  
-    \[
-      \text{Precision} = \frac{TP}{TP + FP},\quad
-      \text{Recall}    = \frac{TP}{TP + FN},\quad
-      F_{1}           = \frac{2\,\text{Precision}\,\text{Recall}}{\text{Precision} + \text{Recall}}\,.
-    \]
+    \begin{align}
+      \text{Precision} &= \frac{TP}{TP + FP} \nonumber \\
+      \text{Recall}    &= \frac{TP}{TP + FN} \nonumber \\
+      F_1              &= \frac{2\,\text{Precision}\,\text{Recall}}{\text{Precision} + \text{Recall}} \nonumber
+    \end{align}
+
     分析 micro-averaged 與 macro-averaged 章節層級表現。  
   \item \textbf{混淆矩陣 (Confusion Matrix)}：找出最常誤判章節，例如數學「角」 vs.「三角形」、平面解析幾何 vs.向量。  
   \item \textbf{Token 使用量}：對比「純 LLM 直接分類」(GPT-3.5) vs.「本地模型 + LLM prompt」之平均 Token 數。  
@@ -201,9 +224,12 @@
 \end{itemize}
 
 \subsection{實驗結果}
-\begin{table}[h]
-  \small  % 縮小表格字級
+
+
+\begin{table}[H]
   \centering
+  \small
+  \resizebox{\linewidth}{!}{
   \begin{tabular}{@{}lccccc@{}}
     \toprule
     \textbf{模型}     & \textbf{Accuracy} & \textbf{Micro-F1} & \textbf{Macro-F1} & \textbf{Latency (ms)} & \textbf{平均 Token} \\
@@ -213,10 +239,12 @@
     扁平式分類 (Flat) & 89.1\%   & 88.7\%   & 84.9\%   & 47    & 770   \\
     DoRA‐BERT (級聯)  & 92.5\%   & 92.2\%   & 88.9\%   & 52    & 540   \\
     DoRA‐BERT (聯合)  & 92.9\%   & 92.6\%   & 89.5\%   & 62    & 510   \\
-    GPT-3.5 Prompt   & 83.2\%   & 82.8\%   & 79.1\%   & $>600$ & 1180  \\
+    GPT-3.5 Prompt   & 83.2\%   & 82.8\%   & 79.1\%   & $>$600 & 1180  \\
     \bottomrule
   \end{tabular}
-  \caption{各模型在測試集上的章節層級分類實驗成績，以及推論延遲與平均 Token 比較}
+  }
+  \caption{各模型在測試集上的章節層級分類實驗成績}
+  \label{tab:results}
 \end{table}
 
 \vspace{1ex}
@@ -255,7 +283,7 @@
 \end{itemize}
 
 %----------------------------------------
-%   第七章：討論
+%   第五章：討論
 %----------------------------------------
 \section{討論}
 \begin{itemize}
@@ -290,7 +318,7 @@
 \end{itemize}
 
 %----------------------------------------
-%   結論與未來應用展望
+%   第六章：結論與未來應用展望
 %----------------------------------------
 \section{結論與未來應用展望}
 
@@ -302,7 +330,6 @@
   \item 缺點：需同時部署輕量分類模型與 LLM，維運複雜度略增。  
 \end{itemize}
 
-
 \subsection{未來應用展望}
 \begin{itemize}[nosep,leftmargin=1.5em]
   \item \textbf{縮小模型的 size 與 Infer size：} INT4／INT2 量化、知識蒸餾，壓縮權重與記憶體佔用。  
@@ -311,29 +338,28 @@
   \item \textbf{YOLO 框出題圖＋指向式 BLIP：} 先用 YOLO 標註 ROI，再加導向 Prompt 讓 BLIP 精確描述圖形。  
 \end{itemize}
 
-
 %----------------------------------------
-%   分工表
+%   附錄：分工表
 %----------------------------------------
-\appendix
+\appendices
 \section{附錄：分工表}
 
-\begin{table}[h]
+\begin{table}[H]
   \centering
   \small           
-  \begin{tabular}{@{}llp{7cm}@{}}  % p{7cm} 可依版面調寬
+  \begin{tabular}{@{}llp{6.8cm}@{}}
     \toprule
     組員 & 學號 & 主要負責項目 \\
     \midrule
     陳泊華 & B12705014 & 模型訓練、Pipeline 建置、實驗設計 \\
-    徐郁翔 & B12705027 & 簡報製作，OCR,BLIP 嘗試、實驗設計 \\
+    徐郁翔 & B12705027 & 簡報製作，OCR、BLIP 嘗試、實驗設計 \\
     陳予婕 & B12705038 & 書面報告、統整資料 \\
-    陳冠宇 & B12705058 & 實驗設計、LIVE DEMO 製作\\
+    陳冠宇 & B12705058 & 實驗設計、LIVE DEMO 製作 \\
     \bottomrule
   \end{tabular}
   \caption{本專案組員分工}
+  \label{tab:appendix}
 \end{table}
-
 
 \end{CJK}
 \end{document}
